@@ -10,12 +10,18 @@
 #define BLOCK_SIZE (512 * 1024)
 #define BOUNDARY_SIZE 48
 
+#ifndef TRUE
+#define TRUE 1
+#define FALSE 0
+#endif
+
 struct _XmlBlock {
   char block[BLOCK_SIZE];
   char boundary[BOUNDARY_SIZE];
   char *start;
   char *end;
   size_t length;
+  size_t boundaryLength;
   char in_body;
 };
 
@@ -85,12 +91,14 @@ size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
       exit(1);
     }
     
-    block->boundary[0] = '-';
-    block->boundary[1] = '-';
-    strcpy(block->boundary + 2, bp + 9);
+    block->boundary[0] = block->boundary[1] = '-';
+    strncpy(block->boundary + 2, bp + 9, BOUNDARY_SIZE - 3);
+    block->boundary[BOUNDARY_SIZE - 1] = '\0';
     bp = block->boundary + (strlen(block->boundary) - 1);
     while (!isalnum(*bp))
       *bp-- = '\0';
+    
+    block->boundaryLength = strlen(block->boundary);
     
     printf("Found boundary: %s\n", block->boundary);
   }
@@ -119,33 +127,30 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
   block->end += size * nmemb;
   *(block->end) = '\0';
   
-  while (!need_data)
+  do
   {
+    need_data = TRUE;
     if (!block->in_body)
     {
       // Look for the boundary
-      char *cp, *bp = strstr(block->start, block->boundary);
-      
-      // We've found a block, now parse the mime header for the content length...
-      if (bp != NULL && (block->end - block->start) > strlen(block->boundary) + 40 && 
-          block->length == 0)
+      char *bp = strstr(block->start, block->boundary);
+      if (bp != NULL)
       {
-        // Parse the headers after the boundary for the content length.
-        bp += strlen(block->boundary);
-        cp = strcasestr(bp, "Content-length:");
-        if (cp != NULL) {
-          block->length = atoi(cp + 16);
+        char *ep = strstr(bp, "\r\n\r\n");
+        if (ep != NULL)
+        {
+          // Parse the headers after the boundary for the content length.
+          bp += block->boundaryLength + 2;
+          char *cp = strcasestr(bp, "Content-length:");
+          if (cp != NULL) {
+            block->length = atoi(cp + 16);
+          }
+          
+          // Scan for the "\r\n\r\n"
+          block->in_body = 1;
+          block->start = ep + 4;
         }
       }
-      
-      // Scan for the "\r\n\r\n"
-      cp = strstr(cp, "\r\n\r\n");
-      if (cp != NULL)
-      {
-        block->in_body = 1;
-        block->start = cp + 4;
-      }
-      
     }
     
     if (block->in_body && (block->end - block->start) >= block->length)
@@ -164,13 +169,9 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
       block->length = 0;
       block->in_body = 0;
       
-      if (len < 60) need_data = 1;
+      if (len > 60) need_data = FALSE;
     }
-    else
-    {
-      need_data = 1;
-    }
-  }
+  } while (!need_data);
   
   return size * nmemb;
 }
@@ -228,8 +229,7 @@ void HandleXmlChunk(const char *xml)
     return;
   }
   
-  // Spin through all the assets and create cutting tool objects for the cutting tools
-  // all others add as plain text.
+  // Evaluate the xpath.
   xmlXPathObjectPtr nodes = xmlXPathEval(BAD_CAST path, xpathCtx);
   if (nodes == NULL || nodes->nodesetval == NULL)
   {
@@ -239,6 +239,7 @@ void HandleXmlChunk(const char *xml)
    return;
   }
   
+  // Spin through all the events, samples and conditions.
   xmlNodeSetPtr nodeset = nodes->nodesetval;
   for (i = 0; i != nodeset->nodeNr; ++i)
   {
@@ -254,7 +255,7 @@ void HandleXmlChunk(const char *xml)
     xmlFree(name);
   }
 
-  xmlFreeDoc(document);
   xmlXPathFreeObject(nodes);    
   xmlXPathFreeContext(xpathCtx);
+  xmlFreeDoc(document);
 }

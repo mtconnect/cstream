@@ -7,12 +7,18 @@
 #include <libxml/xpath.h>
 #include <libxml/xpathInternals.h>
 
-#define BLOCK_SIZE (512 * 1024)
+#define BLOCK_SIZE (2048 * 1024)
 #define BOUNDARY_SIZE 48
 
 #ifndef TRUE
 #define TRUE 1
 #define FALSE 0
+#endif
+
+#ifdef WIN32
+#define strncasecmp _strnicmp
+// #define strncpy strncpy_s
+// #define vsprintf vspprintf_s
 #endif
 
 struct _XmlBlock {
@@ -109,7 +115,7 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
 {
   /* First find the boundary in the current block. */
   XmlBlock *block = (XmlBlock*) data;
-  int need_data = 0;
+  int need_data;
   
   if (block->boundary[0] == '\0')
   {
@@ -140,8 +146,9 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
         if (ep != NULL)
         {
           // Parse the headers after the boundary for the content length.
+          char *cp;
           bp += block->boundaryLength + 2;
-          char *cp = strcasestr(bp, "Content-length:");
+          cp = strcasestr(bp, "Content-length:");
           if (cp != NULL) {
             block->length = atoi(cp + 16);
           }
@@ -155,14 +162,17 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
     
     if (block->in_body && (block->end - block->start) >= block->length)
     {
+      char *ep;
+      size_t len;
+
       *(block->start + block->length) = '\0';
       
       /* We have a new chunk of xml data... */
       HandleXmlChunk(block->start);
       
       /* Consume the block and reset the pointers. */
-      char *ep = block->start + block->length;
-      size_t len = block->end - ep;
+      ep = block->start + block->length;
+      len = block->end - ep;
       if (len > 0) memcpy(block->block, ep, len);
       block->start = block->block;
       block->end = block->block + len;
@@ -205,6 +215,12 @@ void HandleXmlChunk(const char *xml)
 {
   xmlDocPtr document;
   int i;
+  char *path;
+  xmlXPathContextPtr xpathCtx;
+  xmlNodePtr root;
+  xmlXPathObjectPtr nodes;
+  xmlNodeSetPtr nodeset;
+
   document = xmlReadDoc(BAD_CAST xml, "file://node.xml",
                         NULL, XML_PARSE_NOBLANKS);
   if (document == NULL) 
@@ -214,10 +230,10 @@ void HandleXmlChunk(const char *xml)
     return;
   }
   
-  char *path = "//m:Events/*|//m:Samples/*|//m:Condition/*";
-  xmlXPathContextPtr xpathCtx = xmlXPathNewContext(document);
+  path = "//m:Events/*|//m:Samples/*|//m:Condition/*";
+  xpathCtx = xmlXPathNewContext(document);
   
-  xmlNodePtr root = xmlDocGetRootElement(document);
+  root = xmlDocGetRootElement(document);
   if (root->ns != NULL)
   {
     xmlXPathRegisterNs(xpathCtx, BAD_CAST "m", root->ns->href);
@@ -230,7 +246,7 @@ void HandleXmlChunk(const char *xml)
   }
   
   // Evaluate the xpath.
-  xmlXPathObjectPtr nodes = xmlXPathEval(BAD_CAST path, xpathCtx);
+  nodes = xmlXPathEval(BAD_CAST path, xpathCtx);
   if (nodes == NULL || nodes->nodesetval == NULL)
   {
     printf("No nodes found matching XPath\n");
@@ -240,14 +256,16 @@ void HandleXmlChunk(const char *xml)
   }
   
   // Spin through all the events, samples and conditions.
-  xmlNodeSetPtr nodeset = nodes->nodesetval;
+  nodeset = nodes->nodesetval;
   for (i = 0; i != nodeset->nodeNr; ++i)
   {
     xmlNodePtr n = nodeset->nodeTab[i];
     xmlChar *name = xmlGetProp(n, BAD_CAST "name");
+    xmlChar *value;
+
     if (name == NULL)
       name = xmlGetProp(n, BAD_CAST "dataItemId");
-    xmlChar *value = xmlNodeGetContent(n);
+    value = xmlNodeGetContent(n);
 
     printf("Found: %s:%s with value %s\n", 
            n->name, name, value);

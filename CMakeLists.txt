@@ -20,12 +20,12 @@ if(WIN32)
   set_property(TARGET libxml2 PROPERTY IMPORTED_LOCATION_RELEASE ${LibXML2_LIBRARIES})
   set_property(TARGET libxml2 PROPERTY IMPORTED_LOCATION_DEBUG ${LibXML2_DEBUG_LIBRARIES})
   
-  add_library(libcurl_a STATIC IMPORTED)
+  add_library(curl STATIC IMPORTED)
   set(CURL_INCLUDE_DIR win32/curl-7.22.0/include )
   file(GLOB CURL_LIBRARY win32/curl-7.22.0/lib/libcurl_a.lib)
   file(GLOB CURL_DEBUG_LIBRARY win32/curl-7.22.0/lib/libcurl_a_debug.lib)
-  set_property(TARGET libcurl_a PROPERTY IMPORTED_LOCATION_RELEAES ${CURL_LIBRARY})
-  set_property(TARGET libcurl_a PROPERTY IMPORTED_LOCATION_DEBUG ${CURL_DEBUG_LIBRARY})
+  set_property(TARGET curl PROPERTY IMPORTED_LOCATION_RELEAES ${CURL_LIBRARY})
+  set_property(TARGET curl PROPERTY IMPORTED_LOCATION_DEBUG ${CURL_DEBUG_LIBRARY})
   
 endif(WIN32)
 
@@ -53,7 +53,7 @@ file(GLOB stream_sources [a-zA-Z_]*.cpp [a-z]*.c)
 file(GLOB headers [a-z_]*.hpp [a-z_]*.h)
 
 add_executable(cstream ${stream_sources} ${headers})
-target_link_libraries(cstream ${LINUX_LIBRARIES} libcurl_a libxml2)
+target_link_libraries(cstream ${LINUX_LIBRARIES} curl libxml2)
 
 if(WIN32)
   target_link_libraries(cstream wsock32.lib)

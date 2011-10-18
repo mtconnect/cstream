@@ -3,9 +3,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <curl/curl.h>
-#include <libxml/parser.h>
-#include <libxml/xpath.h>
-#include <libxml/xpathInternals.h>
+
+#include "stream.h"
 
 #define BLOCK_SIZE (2048 * 1024)
 #define BOUNDARY_SIZE 48
@@ -17,8 +16,8 @@
 
 #ifdef WIN32
 #define strncasecmp _strnicmp
-// #define strncpy strncpy_s
-// #define vsprintf vspprintf_s
+#else
+#define strncpy_s(d, i, s, c) strncpy(d, s, c); 
 #endif
 
 struct _XmlBlock {
@@ -29,14 +28,16 @@ struct _XmlBlock {
   size_t length;
   size_t boundaryLength;
   char in_body;
+  CURL *context;
+  int stopped;
+  MTCStreamXMLHandler handler;
 };
 
 typedef struct _XmlBlock XmlBlock;
 
-void HandleXmlChunk(const char *xml);
-
+#ifdef WIN32
 /* Find a string in another string doing a case insensitive search */
-char *strcasestr(const char *s, const char *f)
+static char *strcasestr(const char *s, const char *f)
 {
   const char *sp = s;
   const char *fp = f;
@@ -54,21 +55,10 @@ char *strcasestr(const char *s, const char *f)
   
   return NULL;
 }
+#endif
 
 
-void StreamXMLErrorFunc(void *ctx ATTRIBUTE_UNUSED, const char *msg, ...)
-{
-  va_list args;
-  char buffer[2048];
-  va_start(args, msg);
-  vsnprintf(buffer, 2046, msg, args);
-  buffer[2047] = '0';
-  va_end(args);
-  
-  fprintf(stderr, "XML Error: %s\n", buffer);   
-}
-
-size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
+static size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
 {
   char line[512];
   XmlBlock *block = (XmlBlock*) data;
@@ -98,7 +88,7 @@ size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
     }
     
     block->boundary[0] = block->boundary[1] = '-';
-    strncpy(block->boundary + 2, bp + 9, BOUNDARY_SIZE - 3);
+    strncpy_s(block->boundary + 2, BOUNDARY_SIZE - 3, bp + 9, BOUNDARY_SIZE - 3);
     block->boundary[BOUNDARY_SIZE - 1] = '\0';
     bp = block->boundary + (strlen(block->boundary) - 1);
     while (!isalnum(*bp))
@@ -111,11 +101,13 @@ size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
   return size * nmemb;
 }
 
-size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
+static size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
 {
   /* First find the boundary in the current block. */
   XmlBlock *block = (XmlBlock*) data;
   int need_data;
+  
+  if (block->stopped) return 0;
   
   if (block->boundary[0] == '\0')
   {
@@ -125,7 +117,7 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
 
   /* Check for buffer overflow. returning a smaller number will cause this 
      to error out */
-  if (size * nmemb > BLOCK_SIZE - (block->end - block->block))
+  if (size * nmemb > (size_t) (BLOCK_SIZE - (block->end - block->block)))
     return BLOCK_SIZE - (block->end - block->block);
   
   /* append the new data to the end of the block and null terminate */
@@ -160,15 +152,17 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
       }
     }
     
-    if (block->in_body && (block->end - block->start) >= block->length)
+    if (block->in_body && (size_t) (block->end - block->start) >= (size_t) block->length)
     {
       char *ep;
       size_t len;
+      int res;
 
       *(block->start + block->length) = '\0';
       
       /* We have a new chunk of xml data... */
-      HandleXmlChunk(block->start);
+      res = block->handler(block->start);
+      if (res == 0) return 0;
       
       /* Consume the block and reset the pointers. */
       ep = block->start + block->length;
@@ -186,94 +180,41 @@ size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
   return size * nmemb;
 }
 
-int main(int argc, char *argv[])
-{
-  XmlBlock data;
-  CURL *handle = curl_easy_init();
-  
-  memset(&data, 0, sizeof(data));
-  data.start = data.end = data.block;
-  
-  //curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
-  curl_easy_setopt(handle, CURLOPT_URL, argv[1]);
-  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, HandleData);
-  curl_easy_setopt(handle, CURLOPT_WRITEDATA, &data);
-  curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, HandleHeader);
-  curl_easy_setopt(handle, CURLOPT_WRITEHEADER, &data);
-  
-  xmlInitParser();
-  xmlXPathInit();
-  xmlSetGenericErrorFunc(NULL, StreamXMLErrorFunc);
 
-  curl_easy_perform(handle);
+// API Methods
+void *MTCStreamInit(const char *aUrl, MTCStreamXMLHandler aHandler)
+{
+  XmlBlock *data = (XmlBlock*) calloc(1, sizeof(XmlBlock));
+  data->start = data->end = data->block;
   
-  return 0;
+  data->context = curl_easy_init();
+  data->handler = aHandler;
+
+  //curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
+  curl_easy_setopt(data->context, CURLOPT_URL, aUrl);
+  curl_easy_setopt(data->context, CURLOPT_WRITEFUNCTION, HandleData);
+  curl_easy_setopt(data->context, CURLOPT_WRITEDATA, data);
+  curl_easy_setopt(data->context, CURLOPT_HEADERFUNCTION, HandleHeader);
+  curl_easy_setopt(data->context, CURLOPT_WRITEHEADER, data);
+
+  return data;
 }
 
-
-void HandleXmlChunk(const char *xml)
+void MTCStreamStop(void *aContext)
 {
-  xmlDocPtr document;
-  int i;
-  char *path;
-  xmlXPathContextPtr xpathCtx;
-  xmlNodePtr root;
-  xmlXPathObjectPtr nodes;
-  xmlNodeSetPtr nodeset;
-
-  document = xmlReadDoc(BAD_CAST xml, "file://node.xml",
-                        NULL, XML_PARSE_NOBLANKS);
-  if (document == NULL) 
-  {
-    fprintf(stderr, "Cannot parse document: %s\n", xml);
-    xmlFreeDoc(document);
-    return;
-  }
+  XmlBlock *data = (XmlBlock*) aContext;
+  data->stopped = 1;
   
-  path = "//m:Events/*|//m:Samples/*|//m:Condition/*";
-  xpathCtx = xmlXPathNewContext(document);
-  
-  root = xmlDocGetRootElement(document);
-  if (root->ns != NULL)
-  {
-    xmlXPathRegisterNs(xpathCtx, BAD_CAST "m", root->ns->href);
-  }
-  else
-  {
-    fprintf(stderr, "Document does not have a namespace: %s\n", xml);
-    xmlFreeDoc(document);
-    return;
-  }
-  
-  // Evaluate the xpath.
-  nodes = xmlXPathEval(BAD_CAST path, xpathCtx);
-  if (nodes == NULL || nodes->nodesetval == NULL)
-  {
-    printf("No nodes found matching XPath\n");
-    xmlXPathFreeContext(xpathCtx);
-    xmlFreeDoc(document);
-   return;
-  }
-  
-  // Spin through all the events, samples and conditions.
-  nodeset = nodes->nodesetval;
-  for (i = 0; i != nodeset->nodeNr; ++i)
-  {
-    xmlNodePtr n = nodeset->nodeTab[i];
-    xmlChar *name = xmlGetProp(n, BAD_CAST "name");
-    xmlChar *value;
+}
 
-    if (name == NULL)
-      name = xmlGetProp(n, BAD_CAST "dataItemId");
-    value = xmlNodeGetContent(n);
+void MTCStreamStart(void *aContext)
+{
+  XmlBlock *data = (XmlBlock*) aContext;
+  curl_easy_perform(data->context);
+}
 
-    printf("Found: %s:%s with value %s\n", 
-           n->name, name, value);
-    xmlFree(value);
-    xmlFree(name);
-  }
-
-  xmlXPathFreeObject(nodes);    
-  xmlXPathFreeContext(xpathCtx);
-  xmlFreeDoc(document);
+void MTCStreamFree(void *aContext)
+{
+  /* Assumes the perform is now complete */
+  free(aContext);
 }

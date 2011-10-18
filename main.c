@@ -99,6 +99,7 @@ static void StreamXMLErrorFunc(void *ctx ATTRIBUTE_UNUSED, const char *msg, ...)
 int main(int argc, char *argv[])
 {
   void *context;
+  void *probe;
   
   if (argc < 2)
   {
@@ -110,7 +111,12 @@ int main(int argc, char *argv[])
   xmlXPathInit();
   xmlSetGenericErrorFunc(NULL, StreamXMLErrorFunc);
   
-  context = MTCStreamInit(argv[1], HandleXmlChunk);
+  const char *xml;
+  probe = MTCWebRequest(argv[1]);
+  MTCWebExecute(probe, &xml);
+  MTCWebFree(probe);
+  
+  context = MTCStreamInit(argv[2], HandleXmlChunk);
   MTCStreamStart(context);
   MTCStreamFree(context);
   

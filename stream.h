@@ -23,11 +23,19 @@ typedef int (*MTCStreamXMLHandler)(const char *aXML);
   
 void *MTCStreamInit(const char *aUrl, MTCStreamXMLHandler aHandler);
 
-void MTCStreamStart(void *aContext);
+int MTCStreamStart(void *aContext);
 
 void MTCStreamStop(void *aContext);
 
 void MTCStreamFree(void *aContext);
+
+void *MTCWebRequest(const char *aUrl);
+
+// Returns 0 for success. aBuffer is owned by aContext and will be freed by MTCWebFree.
+int MTCWebExecute(void *aContext, const char **aBuffer);
+
+void MTCWebFree(void *AContext);
+
   
 #ifdef  __cplusplus
 }

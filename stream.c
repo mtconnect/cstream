@@ -6,8 +6,9 @@
 
 #include "stream.h"
 
-#define BLOCK_SIZE (2048 * 1024)
+#define INITIAL_BLOCK_SIZE (512 * 1024)
 #define BOUNDARY_SIZE 48
+#define PADDING (8 * 1024)
 
 #ifndef TRUE
 #define TRUE 1
@@ -21,7 +22,8 @@
 #endif
 
 struct _XmlBlock {
-  char block[BLOCK_SIZE];
+  char *block;
+  size_t block_size;
   char boundary[BOUNDARY_SIZE];
   char *start;
   char *end;
@@ -58,10 +60,10 @@ static char *strcasestr(const char *s, const char *f)
 #endif
 
 
-static size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
+static size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *user)
 {
   char line[512];
-  XmlBlock *block = (XmlBlock*) data;
+  XmlBlock *data = (XmlBlock*) user;
   
   int len = size * nmemb;
   if (len > 511) len = 511;
@@ -87,51 +89,46 @@ static size_t HandleHeader(char *ptr, size_t size, size_t nmemb, void *data)
       exit(1);
     }
     
-    block->boundary[0] = block->boundary[1] = '-';
-    strncpy_s(block->boundary + 2, BOUNDARY_SIZE - 3, bp + 9, BOUNDARY_SIZE - 3);
-    block->boundary[BOUNDARY_SIZE - 1] = '\0';
-    bp = block->boundary + (strlen(block->boundary) - 1);
+    data->boundary[0] = data->boundary[1] = '-';
+    strncpy_s(data->boundary + 2, BOUNDARY_SIZE - 3, bp + 9, BOUNDARY_SIZE - 3);
+    data->boundary[BOUNDARY_SIZE - 1] = '\0';
+    bp = data->boundary + (strlen(data->boundary) - 1);
     while (!isalnum(*bp))
       *bp-- = '\0';
     
-    block->boundaryLength = strlen(block->boundary);
+    data->boundaryLength = strlen(data->boundary);
     
-    printf("Found boundary: %s\n", block->boundary);
+    printf("Found boundary: %s\n", data->boundary);
   }
   return size * nmemb;
 }
 
-static size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
+static size_t HandleData(char *ptr, size_t size, size_t nmemb, void *user)
 {
   /* First find the boundary in the current block. */
-  XmlBlock *block = (XmlBlock*) data;
+  XmlBlock *data = (XmlBlock*) user;
   int need_data;
   
-  if (block->stopped) return 0;
+  if (data->stopped) return 0;
   
-  if (block->boundary[0] == '\0')
+  if (data->boundary[0] == '\0')
   {
     fprintf(stderr, "Data arrived without boundary\n");
     exit(1);
   }
-
-  /* Check for buffer overflow. returning a smaller number will cause this 
-     to error out */
-  if (size * nmemb > (size_t) (BLOCK_SIZE - (block->end - block->block)))
-    return BLOCK_SIZE - (block->end - block->block);
   
   /* append the new data to the end of the block and null terminate */
-  memcpy(block->end, ptr, size * nmemb);
-  block->end += size * nmemb;
-  *(block->end) = '\0';
+  memcpy(data->end, ptr, size * nmemb);
+  data->end += size * nmemb;
+  *(data->end) = '\0';
   
   do
   {
     need_data = TRUE;
-    if (!block->in_body)
+    if (!data->in_body)
     {
       // Look for the boundary
-      char *bp = strstr(block->start, block->boundary);
+      char *bp = strstr(data->start, data->boundary);
       if (bp != NULL)
       {
         char *ep = strstr(bp, "\r\n\r\n");
@@ -139,39 +136,58 @@ static size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
         {
           // Parse the headers after the boundary for the content length.
           char *cp;
-          bp += block->boundaryLength + 2;
+          bp += data->boundaryLength + 2;
           cp = strcasestr(bp, "Content-length:");
           if (cp != NULL) {
-            block->length = atoi(cp + 16);
+            data->length = atoi(cp + 16);
+          }
+          
+          // Make sure we have enough room for the new block of data
+          if (data->length + (data->end - data->block) > data->block_size) {
+            // Put a small buffer on to the end of the buffer. This is to account for some overflow
+            // of additional bytes. Hopefully this will be large enough for subsequent blocks as well.
+            int new_size = data->length + (data->end - data->block) + PADDING;
+            char *new_block = (char *) malloc(new_size);
+            memcpy(new_block,  data->block, data->block_size);
+            data->block_size = new_size;
+            
+            /* Reset the pointers to the correct positions on the new block of data */
+            data->end = new_block + (data->end - data->block);
+            
+            // Start will be reset below, so just fix up ep.
+            ep = new_block + (ep - data->block);
+            
+            free(data->block);
+            data->block = new_block;
           }
           
           // Scan for the "\r\n\r\n"
-          block->in_body = 1;
-          block->start = ep + 4;
+          data->in_body = 1;
+          data->start = ep + 4;
         }
       }
     }
     
-    if (block->in_body && (size_t) (block->end - block->start) >= (size_t) block->length)
+    if (data->in_body && (size_t) (data->end - data->start) >= (size_t) data->length)
     {
       char *ep;
       size_t len;
       int res;
 
-      *(block->start + block->length) = '\0';
+      *(data->start + data->length) = '\0';
       
       /* We have a new chunk of xml data... */
-      res = block->handler(block->start);
+      res = data->handler(data->start);
       if (res == 0) return 0;
       
       /* Consume the block and reset the pointers. */
-      ep = block->start + block->length;
-      len = block->end - ep;
-      if (len > 0) memcpy(block->block, ep, len);
-      block->start = block->block;
-      block->end = block->block + len;
-      block->length = 0;
-      block->in_body = 0;
+      ep = data->start + data->length;
+      len = data->end - ep;
+      if (len > 0) memcpy(data->block, ep, len);
+      data->start = data->block;
+      data->end = data->block + len;
+      data->length = 0;
+      data->in_body = 0;
       
       if (len > 60) need_data = FALSE;
     }
@@ -185,7 +201,9 @@ static size_t HandleData(char *ptr, size_t size, size_t nmemb, void *data)
 void *MTCStreamInit(const char *aUrl, MTCStreamXMLHandler aHandler)
 {
   XmlBlock *data = (XmlBlock*) calloc(1, sizeof(XmlBlock));
+  data->block = calloc(1, INITIAL_BLOCK_SIZE);
   data->start = data->end = data->block;
+  data->block_size = INITIAL_BLOCK_SIZE;
   
   data->context = curl_easy_init();
   data->handler = aHandler;
@@ -207,14 +225,92 @@ void MTCStreamStop(void *aContext)
   
 }
 
-void MTCStreamStart(void *aContext)
+int MTCStreamStart(void *aContext)
 {
   XmlBlock *data = (XmlBlock*) aContext;
-  curl_easy_perform(data->context);
+  return curl_easy_perform(data->context);
 }
 
 void MTCStreamFree(void *aContext)
 {
+  XmlBlock *data = (XmlBlock*) aContext;
+  free(data->block);
+  
   /* Assumes the perform is now complete */
   free(aContext);
 }
+
+static size_t HandleReqHeader(char *ptr, size_t size, size_t nmemb, void *user)
+{
+  XmlBlock *data = (XmlBlock*) user;
+
+  // All we care about is content length. See if we need to resize our buffer.
+  if (strncasecmp(ptr, "content-length:", size * nmemb) == 0)
+  {
+    data->length = atoi(ptr + 16);
+
+    // Simplier than in the streaming case since we don't have any data yet.
+    if (data->length > data->block_size) {
+      int new_size = data->length + PADDING;
+      char *new_block = (char *) malloc(new_size);
+      data->block_size = new_size;
+            
+      free(data->block);
+      data->start = data->end = data->block = new_block;
+    }
+  }
+  
+  return size * nmemb;
+}
+
+
+static size_t HandleReqData(char *ptr, size_t size, size_t nmemb, void *user)
+{
+  XmlBlock *data = (XmlBlock*) user;
+  
+  // Make sure the content length is correctly stated.
+  if ((size_t) (data->end - data->block) + size * nmemb > data->block_size)
+    return 0;
+
+  memcpy(data->end, ptr, size * nmemb);
+  data->end += size * nmemb;
+  *(data->end) = '\0';
+  
+  return size * nmemb;
+}
+
+void *MTCWebRequest(const char *aUrl)
+{
+  XmlBlock *data = (XmlBlock*) calloc(1, sizeof(XmlBlock));
+  data->block = calloc(1, INITIAL_BLOCK_SIZE);
+  data->start = data->end = data->block;
+  data->block_size = INITIAL_BLOCK_SIZE;
+  
+  data->context = curl_easy_init();
+  
+  //curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
+  curl_easy_setopt(data->context, CURLOPT_URL, aUrl);
+  curl_easy_setopt(data->context, CURLOPT_WRITEFUNCTION, HandleReqData);
+  curl_easy_setopt(data->context, CURLOPT_WRITEDATA, data);
+  curl_easy_setopt(data->context, CURLOPT_HEADERFUNCTION, HandleReqHeader);
+  curl_easy_setopt(data->context, CURLOPT_WRITEHEADER, data);
+  
+  return data;
+}
+
+// Returns 0 for success. aBuffer is owned by aContext and will be freed by MTCWebFree.
+int MTCWebExecute(void *aContext, const char **aBuffer)
+{
+  XmlBlock *data = (XmlBlock*) aContext;
+  int res = curl_easy_perform(data->context);
+  if (res == 0)
+    *aBuffer = data->block;
+  return res;
+}
+
+void MTCWebFree(void *aContext)
+{
+  MTCStreamFree(aContext);
+}
+
+
